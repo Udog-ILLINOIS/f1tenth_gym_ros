@@ -27,7 +27,7 @@ from functools import partial
 import rclpy
 from rclpy.node import Node
 from rosgraph_msgs.msg import Clock
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32, Int32
 
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
@@ -166,11 +166,14 @@ class Opponent:
         self.wheel_angle = 0.0
         self.scan = []
         self.collision = False
+        self.lap_count = 0  # last value published, to log each completed lap once
         self.scan_pub = None
         self.odom_pub = None
         self.ego_odom_pub = None
         self.odom_in_ego_pub = None
         self.collision_pub = None
+        self.lap_count_pub = None
+        self.lap_time_pub = None
         self.drive_sub = None
         self.reset_sub = None
 
@@ -414,6 +417,11 @@ class GymBridge(Node):
         self.ego_odom_pub = self.create_publisher(Odometry, ego_odom_topic, 10)
         self.ego_collision_pub = self.create_publisher(
             Bool, self.ego_namespace + '/collision', 10)
+        self.ego_lap_count = 0  # last value published, to log each completed lap once
+        self.ego_lap_count_pub = self.create_publisher(
+            Int32, self.ego_namespace + '/lap_count', 10)
+        self.ego_lap_time_pub = self.create_publisher(
+            Float32, self.ego_namespace + '/lap_time', 10)
         self.ego_drive_published = False
         for opp in self.opps:
             opp.scan_pub = self.create_publisher(LaserScan, opp.scan_topic, 10)
@@ -422,6 +430,10 @@ class GymBridge(Node):
             opp.odom_in_ego_pub = self.create_publisher(Odometry, opp.odom_in_ego_topic, 10)
             opp.collision_pub = self.create_publisher(
                 Bool, opp.namespace + '/collision', 10)
+            opp.lap_count_pub = self.create_publisher(
+                Int32, opp.namespace + '/lap_count', 10)
+            opp.lap_time_pub = self.create_publisher(
+                Float32, opp.namespace + '/lap_time', 10)
 
         if self.get_parameter('use_sim_time_bridge').value:
             self.get_logger().info('Using simulation time. Will publish /clock topic. Drive and odom will be as fast as possible.')
@@ -615,6 +627,26 @@ class GymBridge(Node):
         self.ego_collision_pub.publish(Bool(data=self.ego_collision))
         for opp in self.opps:
             opp.collision_pub.publish(Bool(data=opp.collision))
+
+        # pub lap counter: completed laps and the last completed lap's time. Laps are
+        # only counted on maps with a centerline CSV; both stay 0 otherwise.
+        lap_counts = self.env.unwrapped.lap_counts
+        lap_times = self.env.unwrapped.lap_times
+        ego_laps = int(lap_counts[0])
+        if ego_laps > self.ego_lap_count:
+            self.get_logger().info(
+                f'{self.ego_namespace} completed lap {ego_laps}, last lap {float(lap_times[0]):.2f} s')
+        self.ego_lap_count = ego_laps  # follows resets back to 0 as well
+        self.ego_lap_count_pub.publish(Int32(data=ego_laps))
+        self.ego_lap_time_pub.publish(Float32(data=float(lap_times[0])))
+        for i, opp in enumerate(self.opps, start=1):
+            laps = int(lap_counts[i])
+            if laps > opp.lap_count:
+                self.get_logger().info(
+                    f'{opp.namespace} completed lap {laps}, last lap {float(lap_times[i]):.2f} s')
+            opp.lap_count = laps
+            opp.lap_count_pub.publish(Int32(data=laps))
+            opp.lap_time_pub.publish(Float32(data=float(lap_times[i])))
 
         # pub tf
         self._publish_odom(ts)
